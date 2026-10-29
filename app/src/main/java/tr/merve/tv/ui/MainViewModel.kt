@@ -38,13 +38,17 @@ data class MainState(
     val refreshing: Boolean = false,
     val refreshMessage: String? = null,
     val hasRemote: Boolean = false,
+    /** Result of the TV's own stream check; overrides the list's verdict when present. */
+    val localAlive: Map<String, Boolean> = emptyMap(),
+    val checking: Boolean = false,
 ) {
     val loaded: Boolean get() = list != null
 
-    val channels: List<Channel> by lazy {
-        list?.channels.orEmpty().filter { !settings.hideDead || it.alive }
+    private val all: List<Channel> by lazy {
+        list?.channels.orEmpty().map { c -> localAlive[c.id]?.let { c.copy(alive = it) } ?: c }
     }
-    val byId: Map<String, Channel> by lazy { list?.channels.orEmpty().associateBy { it.id } }
+    val channels: List<Channel> by lazy { all.filter { !settings.hideDead || it.alive } }
+    val byId: Map<String, Channel> by lazy { all.associateBy { it.id } }
     val groups: List<Group> get() = list?.groups.orEmpty()
 
     fun inGroup(id: String): List<Channel> = channels.filter { it.group == id }
@@ -69,10 +73,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val list = MutableStateFlow<ChannelList?>(null)
     private val refreshing = MutableStateFlow(false)
     private val refreshMessage = MutableStateFlow<String?>(null)
+    private val checker = container.checker
+    private val localAlive = MutableStateFlow(emptyMap<String, Boolean>())
+    private val checking = MutableStateFlow(false)
+    private val status = combine(refreshing, refreshMessage, checking) { r, m, c -> Triple(r, m, c) }
 
     val state: StateFlow<MainState> =
-        combine(list, prefs.settings, refreshing, refreshMessage) { l, s, r, m ->
-            MainState(l, s, r, m, repo.hasRemote)
+        combine(list, prefs.settings, status, localAlive) { l, s, st, a ->
+            MainState(l, s, st.first, st.second, repo.hasRemote, a, st.third)
         }.stateIn(viewModelScope, SharingStarted.Eagerly, MainState())
 
     val http get() = container.http
@@ -81,8 +89,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch {
+            localAlive.value = checker.load()
             list.value = repo.loadLocal()
             if (repo.isStale()) refresh(silent = true)
+            else if (checker.isStale()) checkStreams()
+        }
+    }
+
+    fun checkStreams() {
+        val channels = list.value?.channels ?: return
+        if (checking.value) return
+        viewModelScope.launch {
+            checking.value = true
+            localAlive.value = checker.checkAll(channels)
+            checking.value = false
         }
     }
 
@@ -97,6 +117,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 .onFailure { if (!silent) refreshMessage.value = it.message ?: "Güncellenemedi" }
             refreshing.value = false
+            checkStreams()
         }
     }
 

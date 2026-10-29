@@ -93,9 +93,11 @@ fun SettingsScreen(
                 buildString {
                     append(if (state.hasRemote) "Liste her gece otomatik güncellenir" else "Otomatik güncelleme adresi henüz ayarlanmadı")
                     if (updated != null) append(" · Liste tarihi: $updated (UTC)")
+                    if (state.checking) append(" · Kanallar bu TV'den test ediliyor")
+                    else if (state.localAlive.isNotEmpty()) append(" · Bu TV'de ${state.localAlive.count { it.value }} kanal çalışıyor")
                 },
                 onClick = onRefresh,
-            ) { RefreshPill(state.refreshing) }
+            ) { RefreshPill(state.refreshing || state.checking) }
             state.refreshMessage?.let { Text(it, style = T.Small.copy(color = C.AccentSoft), modifier = Modifier.padding(start = 8.dp)) }
 
             Spacer(Modifier.heightIn(min = 24.dp))
