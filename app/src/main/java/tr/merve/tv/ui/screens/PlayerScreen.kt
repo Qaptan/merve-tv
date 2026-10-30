@@ -108,13 +108,25 @@ fun PlayerScreen(
     }
     val context = LocalContext.current
     val motion = LocalMotion.current
-    var index by remember { mutableIntStateOf(channels.indexOfFirst { it.id == startId }.coerceAtLeast(0)) }
+    // Track the channel by id, not position: the list changes under us when the
+    // background stream check or a refresh finishes, and a stored position would
+    // then point at a different channel.
+    var currentId by remember { mutableStateOf(channels.firstOrNull { it.id == startId }?.id ?: channels.first().id) }
+    var lastSeen by remember { mutableStateOf(channels.firstOrNull { it.id == currentId } ?: channels.first()) }
+    var lastIndex by remember { mutableIntStateOf(0) }
     var streamIdx by remember { mutableIntStateOf(0) }
     var failed by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(true) }
     var showInfo by remember { mutableStateOf(true) }
     var listOpen by remember { mutableStateOf(false) }
-    val channel = channels[index.coerceIn(0, channels.lastIndex)]
+    val found = channels.indexOfFirst { it.id == currentId }
+    if (found >= 0) {
+        lastSeen = channels[found]
+        lastIndex = found
+    }
+    // If the channel dropped out of the list, keep playing it rather than jumping.
+    val channel = if (found >= 0) channels[found] else lastSeen
+    val index = if (found >= 0) found else lastIndex.coerceIn(0, channels.lastIndex)
     val currentChannel by rememberUpdatedState(channel)
 
     val player = remember {
@@ -159,11 +171,15 @@ fun PlayerScreen(
         }
     }
 
-    fun zap(step: Int) {
-        index = (index + step + channels.size) % channels.size
+    fun select(id: String) {
+        currentId = id
         streamIdx = 0
         failed = false
         showInfo = true
+    }
+    fun zap(step: Int) {
+        val base = if (found >= 0) index else if (step > 0) index - 1 else index
+        select(channels[((base + step) % channels.size + channels.size) % channels.size].id)
     }
 
     val root = remember { FocusRequester() }
@@ -229,12 +245,8 @@ fun PlayerScreen(
             enter = if (motion == Motion.Off) fadeIn() else fadeIn() + slideInHorizontally { -it / 2 },
             exit = if (motion == Motion.Off) fadeOut() else fadeOut() + slideOutHorizontally { -it / 2 },
         ) {
-            ChannelList(channels, index) { i ->
-                if (i != index) {
-                    index = i
-                    streamIdx = 0
-                    failed = false
-                }
+            ChannelList(channels, if (found >= 0) index else -1) { i ->
+                if (channels[i].id != currentId) select(channels[i].id)
                 listOpen = false
                 showInfo = true
             }
@@ -293,7 +305,7 @@ private fun ChannelList(channels: List<Channel>, current: Int, onPick: (Int) -> 
             Surface(
                 onClick = { onPick(i) },
                 modifier = Modifier.fillMaxWidth().height(56.dp)
-                    .then(if (on) Modifier.focusRequester(currentFocus) else Modifier),
+                    .then(if (i == current.coerceAtLeast(0)) Modifier.focusRequester(currentFocus) else Modifier),
                 shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
                 colors = ClickableSurfaceDefaults.colors(
                     containerColor = if (on) Color(0x26FFFFFF) else Color.Transparent,
