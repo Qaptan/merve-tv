@@ -63,6 +63,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -77,6 +78,7 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import tr.merve.tv.data.Channel
 import tr.merve.tv.data.Motion
+import tr.merve.tv.data.SegmentPrefetcher
 import tr.merve.tv.data.Stream
 import tr.merve.tv.ui.components.ChannelLogo
 import tr.merve.tv.ui.components.LiveBadge
@@ -102,7 +104,13 @@ private fun buildPlayer(context: android.content.Context): ExoPlayer {
     val meter = DefaultBandwidthMeter.Builder(context)
         .setInitialBitrateEstimate(1_500_000)
         .build()
+    // Prefetched segments arrive instantly, which makes the bandwidth estimate look
+    // higher than the line really is; cap quality at what the 1080p UI needs.
+    val tracks = DefaultTrackSelector(context).apply {
+        setParameters(buildUponParameters().setMaxVideoSize(1920, 1080).setMaxVideoBitrate(8_000_000))
+    }
     return ExoPlayer.Builder(context)
+        .setTrackSelector(tracks)
         .setLoadControl(load)
         .setBandwidthMeter(meter)
         .build()
@@ -164,13 +172,15 @@ fun PlayerScreen(
     val index = if (found >= 0) found else lastIndex.coerceIn(0, channels.lastIndex)
     val currentChannel by rememberUpdatedState(channel)
 
-    val playerHttp = remember(http) {
+    val baseHttp = remember(http) {
         http.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
+    val prefetcher = remember(baseHttp) { SegmentPrefetcher(baseHttp) }
+    val playerHttp = remember(prefetcher) { baseHttp.newBuilder().addInterceptor(prefetcher).build() }
     val player = remember { buildPlayer(context) }
     fun restartAtLiveEdge() {
         player.seekToDefaultPosition()
@@ -199,6 +209,7 @@ fun PlayerScreen(
         onDispose {
             player.removeListener(listener)
             player.release()
+            prefetcher.close()
         }
     }
 
@@ -210,6 +221,7 @@ fun PlayerScreen(
         }
         failed = false
         retries = 0
+        prefetcher.reset()
         player.setMediaSource(mediaSourceFor(s, playerHttp))
         player.prepare()
         player.play()
