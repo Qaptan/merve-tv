@@ -61,7 +61,10 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -71,6 +74,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import tr.merve.tv.data.Channel
 import tr.merve.tv.data.Motion
 import tr.merve.tv.data.Stream
@@ -82,16 +86,46 @@ import tr.merve.tv.ui.theme.T
 
 private const val DEFAULT_UA = "Mozilla/5.0 (Linux; Android 14) Merve/1.0"
 
+// Streams come from Turkey to a TV far away (Bali): each request takes 1.5-3.5 s and
+// a segment often downloads barely faster than it plays. Sit well behind the live
+// edge so there is room to buffer, never speed up to catch up, retry loads instead
+// of failing, and wait for a solid buffer after a stall instead of stuttering.
+private const val LIVE_OFFSET_MS = 30_000L
+private const val STALL_LIMIT_MS = 15_000L
+private const val RETRIES_PER_STREAM = 3
+
+private fun buildPlayer(context: android.content.Context): ExoPlayer {
+    val load = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(30_000, 90_000, 3_000, 8_000)
+        .setPrioritizeTimeOverSizeThresholds(true)
+        .build()
+    val meter = DefaultBandwidthMeter.Builder(context)
+        .setInitialBitrateEstimate(1_500_000)
+        .build()
+    return ExoPlayer.Builder(context)
+        .setLoadControl(load)
+        .setBandwidthMeter(meter)
+        .build()
+        .apply { playWhenReady = true }
+}
+
 private fun mediaSourceFor(s: Stream, http: OkHttpClient): MediaSource {
     val data = OkHttpDataSource.Factory(http).setUserAgent(s.userAgent ?: DEFAULT_UA)
     s.referrer?.let { data.setDefaultRequestProperties(mapOf("Referer" to it)) }
-    val item = MediaItem.Builder().setUri(s.url).apply {
+    val live = MediaItem.LiveConfiguration.Builder()
+        .setTargetOffsetMs(LIVE_OFFSET_MS)
+        .setMinPlaybackSpeed(1f)
+        .setMaxPlaybackSpeed(1f)
+        .build()
+    val item = MediaItem.Builder().setUri(s.url).setLiveConfiguration(live).apply {
         // Many playlist URLs have no .m3u8 suffix; hinting HLS avoids a failed sniff.
         if (s.url.contains(".m3u8", ignoreCase = true) || !s.url.contains(".mp4", ignoreCase = true)) {
             setMimeType(MimeTypes.APPLICATION_M3U8)
         }
     }.build()
-    return DefaultMediaSourceFactory(data).createMediaSource(item)
+    return DefaultMediaSourceFactory(data)
+        .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(8))
+        .createMediaSource(item)
 }
 
 @Composable
@@ -117,6 +151,7 @@ fun PlayerScreen(
     var streamIdx by remember { mutableIntStateOf(0) }
     var failed by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(true) }
+    var retries by remember { mutableIntStateOf(0) }
     var showInfo by remember { mutableStateOf(true) }
     var listOpen by remember { mutableStateOf(false) }
     val found = channels.indexOfFirst { it.id == currentId }
@@ -129,14 +164,32 @@ fun PlayerScreen(
     val index = if (found >= 0) found else lastIndex.coerceIn(0, channels.lastIndex)
     val currentChannel by rememberUpdatedState(channel)
 
-    val player = remember {
-        ExoPlayer.Builder(context).build().apply { playWhenReady = true }
+    val playerHttp = remember(http) {
+        http.newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+    val player = remember { buildPlayer(context) }
+    fun restartAtLiveEdge() {
+        player.seekToDefaultPosition()
+        player.prepare()
+        player.play()
     }
     DisposableEffect(Unit) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                // Try the channel's next stream before giving up on it.
-                if (streamIdx + 1 < currentChannel.streams.size) streamIdx++ else failed = true
+                when {
+                    error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> restartAtLiveEdge()
+                    retries < RETRIES_PER_STREAM -> {
+                        retries++
+                        restartAtLiveEdge()
+                    }
+                    // Only then try the channel's next stream before giving up on it.
+                    streamIdx + 1 < currentChannel.streams.size -> streamIdx++
+                    else -> failed = true
+                }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING || state == Player.STATE_IDLE
@@ -156,9 +209,17 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         failed = false
-        player.setMediaSource(mediaSourceFor(s, http))
+        retries = 0
+        player.setMediaSource(mediaSourceFor(s, playerHttp))
         player.prepare()
         player.play()
+    }
+    // A stall that never recovers by itself: jump back to the live edge.
+    LaunchedEffect(buffering, failed, channel.id, streamIdx) {
+        if (buffering && !failed) {
+            delay(STALL_LIMIT_MS)
+            if (buffering && !failed) restartAtLiveEdge()
+        }
     }
     LaunchedEffect(channel.id) {
         delay(3000)
