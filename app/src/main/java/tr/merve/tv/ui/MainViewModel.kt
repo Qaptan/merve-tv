@@ -16,6 +16,7 @@ import tr.merve.tv.data.ChannelList
 import tr.merve.tv.data.Group
 import tr.merve.tv.data.Motion
 import tr.merve.tv.data.Settings
+import tr.merve.tv.data.Updater
 
 sealed interface Dest {
     data object Splash : Dest
@@ -24,6 +25,17 @@ sealed interface Dest {
     data class Player(val channelId: String, val listKey: String) : Dest
     data object Search : Dest
     data object Settings : Dest
+}
+
+data class UpdateState(
+    val available: Updater.Update? = null,
+    /** null = idle, 0..1 = downloading. */
+    val progress: Float? = null,
+    val message: String? = null,
+    val dismissed: Boolean = false,
+    val checked: Boolean = false,
+) {
+    val showPrompt: Boolean get() = available != null && !dismissed
 }
 
 object ListKey {
@@ -41,6 +53,7 @@ data class MainState(
     /** Result of the TV's own stream check; overrides the list's verdict when present. */
     val localAlive: Map<String, Boolean> = emptyMap(),
     val checking: Boolean = false,
+    val update: UpdateState = UpdateState(),
 ) {
     val loaded: Boolean get() = list != null
 
@@ -78,9 +91,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val checking = MutableStateFlow(false)
     private val status = combine(refreshing, refreshMessage, checking) { r, m, c -> Triple(r, m, c) }
 
+    private val update = MutableStateFlow(UpdateState())
+
     val state: StateFlow<MainState> =
-        combine(list, prefs.settings, status, localAlive) { l, s, st, a ->
-            MainState(l, s, st.first, st.second, repo.hasRemote, a, st.third)
+        combine(list, prefs.settings, status, localAlive, update) { l, s, st, a, u ->
+            MainState(l, s, st.first, st.second, repo.hasRemote, a, st.third, u)
         }.stateIn(viewModelScope, SharingStarted.Eagerly, MainState())
 
     val http get() = container.http
@@ -93,6 +108,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             list.value = repo.loadLocal()
             if (repo.isStale()) refresh(silent = true)
             else if (checker.isStale()) checkStreams()
+        }
+        checkForUpdate()
+    }
+
+    fun checkForUpdate(manual: Boolean = false) {
+        viewModelScope.launch {
+            if (manual) update.value = update.value.copy(message = "Denetleniyor…")
+            val found = container.updater.check()
+            update.value = update.value.copy(
+                available = found,
+                checked = true,
+                dismissed = if (manual) false else update.value.dismissed,
+                message = if (manual && found == null) "Merve güncel" else null,
+            )
+        }
+    }
+
+    fun dismissUpdate() {
+        update.value = update.value.copy(dismissed = true)
+    }
+
+    fun installUpdate() {
+        val u = update.value.available ?: return
+        if (update.value.progress != null) return
+        viewModelScope.launch {
+            update.value = update.value.copy(progress = 0f, message = null)
+            container.updater.install(u) { p -> update.value = update.value.copy(progress = p) }
+                .onSuccess { update.value = update.value.copy(progress = null, message = "Kurulum onayı bekleniyor") }
+                .onFailure { update.value = update.value.copy(progress = null, message = it.message ?: "Güncelleme kurulamadı") }
         }
     }
 

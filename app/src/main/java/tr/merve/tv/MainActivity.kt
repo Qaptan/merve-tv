@@ -26,6 +26,7 @@ import tr.merve.tv.ui.Dest
 import tr.merve.tv.ui.ListKey
 import tr.merve.tv.ui.MainViewModel
 import tr.merve.tv.ui.components.RailItem
+import tr.merve.tv.ui.components.UpdatePrompt
 import tr.merve.tv.ui.screens.GuideScreen
 import tr.merve.tv.ui.screens.HomeScreen
 import tr.merve.tv.ui.screens.PlayerScreen
@@ -100,8 +101,13 @@ class MainActivity : ComponentActivity() {
                                 onShowLocal = vm::setShowLocal,
                                 onMotion = vm::cycleMotion,
                                 onRefresh = { vm.refresh() },
+                                onUpdate = { if (state.update.available != null) vm.installUpdate() else vm.checkForUpdate(manual = true) },
                             )
                         }
+                    }
+                    val dest = vm.stack.last()
+                    if (state.update.showPrompt && dest != Dest.Splash && dest !is Dest.Player) {
+                        UpdatePrompt(state.update, onInstall = vm::installUpdate, onLater = vm::dismissUpdate)
                     }
                 }
             }

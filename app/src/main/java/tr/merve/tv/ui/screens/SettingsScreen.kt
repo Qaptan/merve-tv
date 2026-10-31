@@ -63,6 +63,7 @@ fun SettingsScreen(
     onShowLocal: (Boolean) -> Unit,
     onMotion: () -> Unit,
     onRefresh: () -> Unit,
+    onUpdate: () -> Unit,
 ) {
     val s = state.settings
     val first = remember { FocusRequester() }
@@ -99,6 +100,16 @@ fun SettingsScreen(
                 onClick = onRefresh,
             ) { RefreshPill(state.refreshing || state.checking) }
             state.refreshMessage?.let { Text(it, style = T.Small.copy(color = C.AccentSoft), modifier = Modifier.padding(start = 8.dp)) }
+            val up = state.update
+            SettingRow(
+                "Uygulama güncellemesi",
+                buildString {
+                    append("Sürüm ${BuildConfig.VERSION_NAME}")
+                    up.available?.let { append(" · Yeni sürüm hazır: ${it.versionName}") }
+                    up.message?.let { append(" · $it") }
+                },
+                onClick = onUpdate,
+            ) { Pill(if (up.available != null) "Güncelle" else "Denetle") }
 
             Spacer(Modifier.heightIn(min = 24.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {

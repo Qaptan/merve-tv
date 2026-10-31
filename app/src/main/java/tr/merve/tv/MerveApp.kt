@@ -12,6 +12,7 @@ import okhttp3.OkHttpClient
 import tr.merve.tv.data.ChannelRepository
 import tr.merve.tv.data.Prefs
 import tr.merve.tv.data.StreamChecker
+import tr.merve.tv.data.Updater
 import java.util.concurrent.TimeUnit
 
 class MerveApp : Application(), SingletonImageLoader.Factory {
@@ -46,4 +47,5 @@ class AppContainer(context: Context) {
     val channels = ChannelRepository(context, http, json, BuildConfig.CHANNELS_URL)
     val prefs = Prefs(context)
     val checker = StreamChecker(context, http, json)
+    val updater = Updater(context, http, json)
 }
